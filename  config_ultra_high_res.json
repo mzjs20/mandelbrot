@@ -1,0 +1,12 @@
+{
+  "width": 76800,
+  "height": 43200,
+  "x_min": -0.74887,
+  "x_max": -0.74884,
+  "y_min": 0.065155,
+  "y_max": 0.06517,
+  "max_iter": 500,
+  "output_filename": "mandelbrot_ultra_high_res.png",
+  "png_compression_level": 1,
+  "png_filter_type": "None"
+}

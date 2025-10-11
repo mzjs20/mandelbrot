@@ -7,4 +7,6 @@ edition = "2024"
 image = "0.25.5"
 rayon = "1.10.0"
 num_cpus = "1.16.0"
-indicatif = "0.17.11"  # 用于进度条显示
+indicatif = "0.17.11"  # 用于进度条
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.138"

@@ -1,0 +1,12 @@
+{
+  "width": 1920,
+  "height": 1080,
+  "x_min": -2.0,
+  "x_max": 1.0,
+  "y_min": -1.0,
+  "y_max": 1.0,
+  "max_iter": 1000,
+  "output_filename": "mandelbrot.png",
+  "png_compression_level": 2,
+  "png_filter_type": "NoFilter"
+}

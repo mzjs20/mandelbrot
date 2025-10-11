@@ -3,14 +3,17 @@ use image::{
     ImageBuffer, RgbImage, Rgb, ExtendedColorType, ImageEncoder,
 };
 use rayon::prelude::*;
+use serde::Deserialize;
 use std::fs::File;
+use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Instant, Duration};
 use num_cpus;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
-/// 配置参数结构体
+/// 配置参数结构体，支持从JSON反序列化
+#[derive(Debug, Deserialize)]
 struct Config {
     width: u32,
     height: u32,
@@ -19,24 +22,39 @@ struct Config {
     y_min: f64,
     y_max: f64,
     max_iter: u32,
-    output_filename: &'static str,
+    output_filename: String,
     png_compression_level: u32,
-    png_filter_type: FilterType,
+    png_filter_type: String,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            width: 1920,
-            height: 1080,
-            x_min: -2.0,
-            x_max: 1.0,
-            y_min: -1.0,
-            y_max: 1.0,
-            max_iter: 1000,
-            output_filename: "mandelbrot.png",
-            png_compression_level: 2,
-            png_filter_type: FilterType::NoFilter,
+impl Config {
+    /// 从文件加载配置
+    fn from_file(path: &str) -> Result<Self, String> {
+        // 读取文件内容
+        let mut file = File::open(path)
+            .map_err(|e| format!("无法打开配置文件: {}", e))?;
+
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)
+            .map_err(|e| format!("无法读取配置文件: {}", e))?;
+
+        // 解析JSON
+        serde_json::from_str(&contents)
+            .map_err(|e| format!("配置文件格式错误: {}", e))
+    }
+
+    /// 将字符串转换为FilterType
+    fn get_filter_type(&self) -> FilterType {
+        match self.png_filter_type.to_lowercase().as_str() {
+            "none" | "nofilter" => FilterType::NoFilter,
+            "sub" => FilterType::Sub,
+            "up" => FilterType::Up,
+            "avg" => FilterType::Avg,
+            "paeth" => FilterType::Paeth,
+            _ => {
+                eprintln!("未知的过滤类型 '{}'，使用默认值 NoFilter", self.png_filter_type);
+                FilterType::NoFilter
+            }
         }
     }
 }
@@ -166,10 +184,9 @@ fn generate_mandelbrot(config: &Config) -> RgbImage {
     Arc::try_unwrap(image).unwrap().into_inner().unwrap()
 }
 
-/// 带实时进度的图像保存函数（修复类型不匹配错误）
+/// 带实时进度的图像保存函数
 fn save_image_with_progress(image: &RgbImage, filename: &str, compression: CompressionType, filter: FilterType) -> Result<(), String> {
     let (width, height) = (image.width(), image.height());
-    let _total_pixels = width as u64 * height as u64;
     let total_steps = 50; // 进度条总步数，用于平滑显示
 
     println!("\n开始保存图像 ({}x{} pixels)...", width, height);
@@ -213,10 +230,10 @@ fn save_image_with_progress(image: &RgbImage, filename: &str, compression: Compr
         }
     });
 
-    // 执行编码（使用正确的字节切片类型）
+    // 执行编码
     let start_time = Instant::now();
     encoder.write_image(
-        pixels, // 直接使用字节切片
+        pixels,
         width,
         height,
         ExtendedColorType::Rgb8,
@@ -234,25 +251,17 @@ fn save_image_with_progress(image: &RgbImage, filename: &str, compression: Compr
 }
 
 fn main() {
-    let config = Config {
-        width: 76800,    // 超高分辨率宽度
-        height: 43200,   // 超高分辨率高度
-        // 整体视图（比例匹配16:9）
-        // x_min: -2.0,
-        // x_max: 1.0,
-        // y_min: -0.84375,  // 计算得出：(1080/1920)*(1.0 - (-2.0))/2 = 0.84375
-        // y_max: 0.84375,
-
-        // 放大某个区域（确保比例匹配）
-        x_min: -0.74887,
-        x_max: -0.74884,
-        y_min: 0.065155,
-        y_max: 0.065155 + (0.74887-0.74884)*(2160.0/3840.0),
-        max_iter: 500,
-        output_filename: "mandelbrot_ultra_high_res.png",
-        png_compression_level: 1, // 低压缩级别加快保存速度
-        png_filter_type: FilterType::NoFilter, // 不使用过滤算法
+    // 从命令行参数获取配置文件路径，默认为"config.json"
+    let args: Vec<String> = std::env::args().collect();
+    let config_path = if args.len() > 1 {
+        &args[1]
+    } else {
+        "config.json"
     };
+
+    // 加载配置文件
+    let config = Config::from_file(config_path)
+        .expect("加载配置文件失败");
 
     let aspect_ratio = config.width as f64 / config.height as f64;
     let region_ratio = (config.x_max - config.x_min) / (config.y_max - config.y_min);
@@ -271,8 +280,11 @@ fn main() {
         _ => CompressionType::Default,
     };
 
+    // 获取过滤类型
+    let filter_type = config.get_filter_type();
+
     // 使用带进度的保存函数
-    if let Err(e) = save_image_with_progress(&image, config.output_filename, compression, config.png_filter_type) {
+    if let Err(e) = save_image_with_progress(&image, &config.output_filename, compression, filter_type) {
         eprintln!("保存图像失败: {}", e);
     } else {
         println!("图像已保存至: {}", config.output_filename);
