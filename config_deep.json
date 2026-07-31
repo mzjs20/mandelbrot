@@ -1,0 +1,16 @@
+{
+  "width": 19200,
+  "height": 10800,
+  "max_iter": 5000,
+  "output_filename": "deep_1e18.png",
+  "png_compression_level": 1,
+  "png_filter_type": "none",
+
+  "center_re": "-0.744047327885618596691631635069778759229",
+  "center_im": "0.1098916491492589420042574693894010907545",
+  "zoom": "1e22",
+
+  "color_density": 12.0,
+  "series_approx": true,
+  "max_reference_points": 16
+}

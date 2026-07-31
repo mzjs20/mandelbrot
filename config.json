@@ -1,12 +1,12 @@
 {
-  "width": 19200,
-  "height": 10800,
-  "x_min": -0.743643887037151,
-  "x_max": -0.743643887036151,
-  "y_min": 0.131825904205330,
-  "y_max": 0.131825904205893,
-  "max_iter": 50000,
-  "output_filename": "ghost_spiral.png",
+  "width": 3840,
+  "height": 2160,
+  "x_min": -0.743643907087151,
+  "x_max": -0.743643867087151,
+  "y_min": 0.13182589295533,
+  "y_max": 0.13182591545533,
+  "max_iter": 10000,
+  "output_filename": "test.png",
   "png_compression_level": 0,
   "png_filter_type": "none"
 }

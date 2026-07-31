@@ -10,3 +10,9 @@ num_cpus = "1.16.0"
 indicatif = "0.17.11"  # 用于进度条
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.138"
+rug = "1.30"  # 高精度算术（MPFR），用于扰动理论参考轨道
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
