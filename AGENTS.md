@@ -8,6 +8,8 @@ cargo build --release
 ./target/release/mandelbrot_renderer config_deep.json   # 深缩放（高精度字符串，1e18+）
 ```
 
+- CLI 解析 `config_path_from_args`（`src/main.rs`）：位置参数、`-c`/`--config`、`--config=...`、`--config_deep.json`（剥前缀）、`--` 后参数均可；缺省 `config.json`。
+
 - Requires **nightly** Rust (`#![feature(portable_simd)]` in `src/main.rs`).
 - Needs a C toolchain for the `rug` crate (vendored GMP/MPFR); Linux may also need `libpng-dev` (Ubuntu) / `libpng-devel` (Fedora) for the `image` crate.
 
@@ -43,3 +45,8 @@ cargo build --release && cargo clippy && cargo test
 
 - `CLAUDE.md` — older architecture overview (predates this rewrite; perturbation details now live in `src/perturbation.rs`).
 - Sibling project `~/RustroverProjects/mandelbro_video` — source of the perturbation theory design; note its f64 reference re-integration bug at deep zoom (fixed here).
+
+## Notes
+
+- ⚠️ 仓库里有个带前导空格的残留文件 `" config_ultra_high_res.json"`（README 引用的是无空格的 `config_ultra_high_res.json`，并不存在）。内容是浅缩放 76800×43200 超清配置。运行前注意这个坑，必要时重命名或删除。
+- `config_deep.json` 当前 `zoom: "1e22"`；`config.json` 是浅缩放小区域高迭代测试配置（输出 `test.png`）。

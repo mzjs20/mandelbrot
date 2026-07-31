@@ -1,0 +1,35 @@
+name: Build Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  # 交叉编译 Windows x86_64 GNU 版（rug/gmp-mpfr-sys 支持 windows-gnu，不支持 msvc）
+  build-windows-gnu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MinGW toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64 m4
+
+      - name: Install nightly Rust with windows-gnu target
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: Build release
+        run: cargo build --release --target x86_64-pc-windows-gnu
+
+      - name: Run tests (native)
+        run: cargo test
+
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: mandelbrot-windows-x86_64-gnu
+          path: target/x86_64-pc-windows-gnu/release/mandelbrot_renderer.exe

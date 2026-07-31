@@ -1,5 +1,6 @@
 /target
 .idea/
+.reasonix/
 *.png
 *.mp4
 *.ivf
