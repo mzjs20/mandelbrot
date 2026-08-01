@@ -197,6 +197,10 @@ pub fn compute_deltas_hp(
 ///
 /// `eps_re/eps_im` 与 `start_n` 由级数近似提供（无级数近似时为 0 / 0）。
 /// 返回 (逃逸迭代, 逃逸时 |z|²)；glitch 返回 (GLITCH_MARKER, 0)；内部返回 (max_iter, 0)。
+///
+/// 内联 Zhuoran rebase：当 |z_pixel| < |ε|（像素绝对位置比相对参考点的差值还小，
+/// 说明参考轨道不再是最优参考点）时，把 ε 重置为当前像素 z、参考索引归 0，
+/// 复用参考轨道前缀继续迭代——从事前避免 glitch，而非事后检测。
 pub fn perturb_iterate(
     orbit: &ReferenceOrbit,
     delta_re: f64,
@@ -207,20 +211,38 @@ pub fn perturb_iterate(
     start_n: u32,
 ) -> (u32, f64) {
     let orbit_len = orbit.len_bound(max_iter);
+    // rebase 次数上限：防止病态轨迹下反复归零导致性能退化（超限走 glitch 兜底）
+    const MAX_REBASE: u32 = 16;
 
+    let mut n = start_n;
+    let mut rebases = 0u32;
+    // 真实逃逸迭代数：rebase 会重置参考索引 n，但真实迭代数必须持续累计
+    let mut total = start_n;
     // 主循环：直接用高精度参考轨道 Z_n（绝不在 f64 里重新积分 z，
     // 否则 f64 中心误差会随迭代指数放大，深缩放下参考轨道会错误逃逸）。
-    for n in start_n..orbit_len {
+    while n < orbit_len && total < max_iter {
         let (z_re, z_im) = orbit.z(n);
         let sum_re = z_re + eps_re;
         let sum_im = z_im + eps_im;
         let mag_sq = sum_re * sum_re + sum_im * sum_im;
 
         if mag_sq > BAILOUT {
-            return (n, mag_sq);
+            return (total, mag_sq);
         }
         if mag_sq < orbit.tolerance_check[n as usize] {
             return (GLITCH_MARKER, 0.0);
+        }
+
+        // Zhuoran rebase：|z_pixel| < |ε| 时，ε ← z_pixel，参考索引 ← 0。
+        // 用严格小于：rebase 后下一步 Z_0=0，|z'|²==|ε'|² 恒等，避免死循环。
+        // MAX_REBASE 超限时不再 rebase、继续普通扰动迭代（仍正确，仅失去优化）。
+        let eps_mag_sq = eps_re * eps_re + eps_im * eps_im;
+        if rebases < MAX_REBASE && mag_sq < eps_mag_sq {
+            eps_re = sum_re;
+            eps_im = sum_im;
+            n = 0;
+            rebases += 1;
+            continue;
         }
 
         let two_z_eps_re = 2.0 * (z_re * eps_re - z_im * eps_im);
@@ -229,18 +251,20 @@ pub fn perturb_iterate(
         let eps_sq_im = 2.0 * eps_re * eps_im;
         eps_re = two_z_eps_re + eps_sq_re + delta_re;
         eps_im = two_z_eps_im + eps_sq_im + delta_im;
+        n += 1;
+        total += 1;
     }
 
     // 参考轨道已逃逸但像素未逃逸：从逃逸点起在 f64 内联 z（逃逸轨道不敏感，f64 足够）。
     if let Some(esc) = orbit.escaped_at {
         let from = esc.max(start_n);
         let (mut z_re, mut z_im) = orbit.z(from.min(orbit.len() - 1));
-        for n in from..max_iter {
+        while total < max_iter {
             let sum_re = z_re + eps_re;
             let sum_im = z_im + eps_im;
             let mag_sq = sum_re * sum_re + sum_im * sum_im;
             if mag_sq > BAILOUT {
-                return (n, mag_sq);
+                return (total, mag_sq);
             }
             let two_z_eps_re = 2.0 * (z_re * eps_re - z_im * eps_im);
             let two_z_eps_im = 2.0 * (z_re * eps_im + z_im * eps_re);
@@ -253,6 +277,7 @@ pub fn perturb_iterate(
             let zn_im = 2.0 * z_re * z_im + orbit.c_im;
             z_re = zn_re;
             z_im = zn_im;
+            total += 1;
         }
     }
 
@@ -304,7 +329,17 @@ pub fn perturb_iterate_simd(
             iter_count = newly_gl.select(u32x4::splat(GLITCH_MARKER), iter_count);
         }
 
-        active = active & !escaped & !glitched;
+        // Zhuoran rebase 判据（SIMD 版）：|z_pixel| < |ε| 说明参考轨道不再是最优。
+        // SIMD lane 间迭代索引必须同步，无法内联 rebase，故标记 GLITCH_MARKER，
+        // 由 render.rs 的标量回填路径（perturb_iterate，支持真 rebase）重算。
+        let eps_mag_sq = eps_re * eps_re + eps_im * eps_im;
+        let need_rebase = mag_sq.simd_lt(eps_mag_sq);
+        let newly_rb = need_rebase & active;
+        if newly_rb.any() {
+            iter_count = newly_rb.select(u32x4::splat(GLITCH_MARKER), iter_count);
+        }
+
+        active = active & !escaped & !glitched & !need_rebase;
         if !active.any() {
             break;
         }
@@ -802,6 +837,7 @@ impl SeriesApproximation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rug::ops::CompleteRound;
 
     fn orbit_at(c_re: f64, c_im: f64, max_iter: u32, prec: u32) -> ReferenceOrbit {
         let c = Complex::with_val(prec, (c_re, c_im));
@@ -857,12 +893,93 @@ mod tests {
         );
         for lane in 0..4 {
             let (si, sm) = perturb_iterate(&o, d_re[lane], d_im[lane], 512, 0.0, 0.0, 0);
+            if iters[lane] == GLITCH_MARKER && si != GLITCH_MARKER {
+                // SIMD 版把"需 rebase"的 lane 标为 glitch，交给标量回填；
+                // 回填结果应与纯标量（内联 rebase）一致。
+                let (fi, fm) = perturb_iterate(&o, d_re[lane], d_im[lane], 512, 0.0, 0.0, 0);
+                assert_eq!(fi, si, "lane {} rebase 回填 iter", lane);
+                if fi < 512 {
+                    assert!((fm - sm).abs() < 1e-6, "lane {} rebase 回填 mag", lane);
+                }
+                continue;
+            }
             assert_eq!(iters[lane], si, "lane {} iter", lane);
             if si != GLITCH_MARKER && si < 512 {
                 assert!((mags[lane] - sm).abs() < 1e-6, "lane {} mag", lane);
             }
         }
         let _ = (base_re, base_im);
+    }
+
+    /// 内联 rebase 的正确性：深缩放下标量 perturb_iterate（带 rebase）
+    /// 应与逐像素 MPFR 精确迭代一致（逃逸迭代差 ≤ 2）。
+    #[test]
+    fn rebase_matches_naive_hp() {
+        // 用会触发 rebase 的深缩放视野：中心在细丝结构附近，多个 δ 像素
+        let c_re = "-0.743643887037151";
+        let c_im = "0.131825904205330";
+        let prec = 128;
+        let c = Complex::with_val(
+            prec,
+            (Float::parse(c_re).unwrap().complete(prec), Float::parse(c_im).unwrap().complete(prec)),
+        );
+        let o = ReferenceOrbit::compute_hp(&c, 512);
+        let deltas = [
+            (1e-9, 1e-9),
+            (2e-9, -2e-9),
+            (-1e-9, 2e-9),
+            (3e-9, 0.5e-9),
+            (-2.5e-9, -1.5e-9),
+            (0.5e-9, -0.5e-9),
+        ];
+        for (dr, di) in deltas {
+            let (pi, _) = perturb_iterate(&o, dr, di, 512, 0.0, 0.0, 0);
+            let crf = Float::with_val(prec, Float::parse(c_re).unwrap().complete(prec)) + dr;
+            let cif = Float::with_val(prec, Float::parse(c_im).unwrap().complete(prec)) + di;
+            let (hi, _) = naive_hp(&crf, &cif, 512);
+            if pi != GLITCH_MARKER {
+                assert!(
+                    (pi as i32 - hi as i32).abs() <= 2,
+                    "δ=({},{}): perturb={} mpfr={}",
+                    dr,
+                    di,
+                    pi,
+                    hi
+                );
+            }
+        }
+    }
+
+    /// rebase 触发的显式验证：构造 |z_pixel| < |ε| 的场景，
+    /// 确认 perturb_iterate 内联 rebase 后结果与 naive_hp 一致。
+    #[test]
+    fn rebase_trigger_recoveries() {
+        // 深缩放中心在集合外部边缘，δ 较大时 ε 增长超过 |z| 触发 rebase
+        let c_re = "-0.745428";
+        let c_im = "0.113009";
+        let prec = 128;
+        let c = Complex::with_val(
+            prec,
+            (Float::parse(c_re).unwrap().complete(prec), Float::parse(c_im).unwrap().complete(prec)),
+        );
+        let o = ReferenceOrbit::compute_hp(&c, 400);
+        for k in 1..40 {
+            let dr = k as f64 * 1e-7;
+            let di = k as f64 * 1e-7;
+            let (pi, _) = perturb_iterate(&o, dr, di, 400, 0.0, 0.0, 0);
+            let crf = Float::with_val(prec, Float::parse(c_re).unwrap().complete(prec)) + dr;
+            let cif = Float::with_val(prec, Float::parse(c_im).unwrap().complete(prec)) + di;
+            let (hi, _) = naive_hp(&crf, &cif, 400);
+            if pi != GLITCH_MARKER {
+                assert!(
+                    (pi as i32 - hi as i32).abs() <= 2,
+                    "k={}: perturb={} mpfr={}",
+                    k,
+                    pi,
+                    hi
+                );
+            }
+        }
     }
 
     #[test]

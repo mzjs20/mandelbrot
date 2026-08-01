@@ -50,3 +50,10 @@ cargo build --release && cargo clippy && cargo test
 
 - ⚠️ 仓库里有个带前导空格的残留文件 `" config_ultra_high_res.json"`（README 引用的是无空格的 `config_ultra_high_res.json`，并不存在）。内容是浅缩放 76800×43200 超清配置。运行前注意这个坑，必要时重命名或删除。
 - `config_deep.json` 当前 `zoom: "1e22"`；`config.json` 是浅缩放小区域高迭代测试配置（输出 `test.png`）。
+- **Windows 本机构建**：MSVC toolchain 无法编译 `rug`（gmp-mpfr-sys 不支持 MSVC，`build.rs` 直接 panic）。在 Linux 主机上交叉编译：
+  ```bash
+  # 装 mingw-w64 + m4，然后：
+  # Cargo.toml 需加：gmp-mpfr-sys = { version = "1.7", features = ["force-cross"] }
+  cargo build --release --target x86_64-pc-windows-gnu
+  ```
+  或直接用仓库已提交的 `.github/workflows/build.yml`（GitHub Actions 同款流程）。产物为静态链接 .exe，目标机无需装任何运行时。

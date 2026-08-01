@@ -119,11 +119,71 @@ fn fill_naive_row(
 
 // ── 深缩放：扰动理论 ────────────────────────────────────────────────────────
 
+/// 判断整个视野是否位于集合内部（主心形 cardioid 或周期-2 圆盘）。
+///
+/// 主心形与周期-2 圆盘都是凸集，故只需高精度检查四角：
+/// 四角全在 cardioid 内 ⇒ 整帧在 cardioid 内；四角全在 bulb 内 ⇒ 整帧在 bulb 内。
+/// 用 MPFR 计算避免 f64 在边界附近的舍入误判。
+fn frame_inside_cardioid_or_bulb(view: &View) -> bool {
+    let prec = view.precision;
+    let hw = Float::with_val(prec, view.width * 0.5);
+    let hh = Float::with_val(prec, view.height * 0.5);
+    let cxs = [
+        view.center_re.clone() - &hw,
+        view.center_re.clone() + &hw,
+    ];
+    let cys = [
+        view.center_im.clone() - &hh,
+        view.center_im.clone() + &hh,
+    ];
+
+    let qtr = Float::with_val(prec, 0.25);
+    let one16 = Float::with_val(prec, 0.0625);
+    let one = Float::with_val(prec, 1.0);
+
+    let mut all_cardioid = true;
+    let mut all_bulb = true;
+    for cx in &cxs {
+        for cy in &cys {
+            // 主心形：q = (c_re - 1/4)² + c_im²，q·(q + c_re - 1/4) ≤ c_im²/4
+            let c_re_minus = Float::with_val(prec, cx - &qtr);
+            let c_im_sq = Float::with_val(prec, cy.clone().square());
+            let q = Float::with_val(prec, c_re_minus.square() + &c_im_sq);
+            let q_plus = Float::with_val(prec, Float::with_val(prec, &q + cx) - &qtr);
+            let lhs = Float::with_val(prec, &q * &q_plus);
+            let rhs = Float::with_val(prec, &qtr * &c_im_sq);
+            if lhs > rhs {
+                all_cardioid = false;
+            }
+            // 周期-2 圆盘：(c_re + 1)² + c_im² ≤ 1/16
+            let c_re_plus = Float::with_val(prec, cx + &one);
+            let d = Float::with_val(prec, c_re_plus.square() + &c_im_sq);
+            if d > one16 {
+                all_bulb = false;
+            }
+            if !all_cardioid && !all_bulb {
+                return false;
+            }
+        }
+    }
+    all_cardioid || all_bulb
+}
+
 fn render_deep(config: &Config, view: &View) -> IterField {
     let w = config.width as usize;
     let h = config.height as usize;
     let max_iter = config.max_iter;
     let prec = view.precision;
+
+    // 0. 整帧在集合内部（主心形 / 周期-2 圆盘）时直接填 max_iter，
+    //    跳过整个扰动 pass——避免"内部只有散点/白算几百万像素"。
+    //    主心形与周期-2 圆盘都是凸集：四角全在同一个区域内 ⇒ 整帧在内部。
+    if frame_inside_cardioid_or_bulb(view) {
+        println!("视野全部位于集合内部（cardioid/bulb），跳过扰动迭代");
+        let mut field = IterField::new(w * h);
+        field.iters.fill(max_iter);
+        return field;
+    }
 
     // 1. 高精度参考轨道（视图中心）
     let c = Complex::with_val(prec, (view.center_re.clone(), view.center_im.clone()));
@@ -168,8 +228,26 @@ fn render_deep(config: &Config, view: &View) -> IterField {
     let initial_glitches = field.glitch_count();
     println!("初次 glitch 像素: {} / {}", initial_glitches, w * h);
 
-    // 5. 多参考点 rebase 修正
+    // 4.5 原参考点标量 rebase 回填：SIMD 主 pass 标记的 GLITCH_MARKER 里，
+    //     相当一部分只是"需要 rebase"（|z_pixel|<|ε|），标量 perturb_iterate
+    //     内联 rebase 后即可消化，无需换新参考点。
     if initial_glitches > 0 {
+        let glitch_idx: Vec<usize> = field
+            .iters
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| **i == GLITCH_MARKER)
+            .map(|(idx, _)| idx)
+            .collect();
+        rerender_glitches(&orbit, series.as_ref(), skip, &dre, &dim, &glitch_idx, &mut field, w, max_iter);
+        let after = field.glitch_count();
+        if after != initial_glitches {
+            println!("标量 rebase 回填: glitch {} -> {}", initial_glitches, after);
+        }
+    }
+
+    // 5. 多参考点 rebase 修正
+    if field.glitch_count() > 0 {
         rebase_loop(config, view, &dre, &dim, &mut field, w, h, max_iter);
         println!("rebase 后残余 glitch 像素: {}", field.glitch_count());
     }
@@ -327,31 +405,18 @@ fn rerender_glitches(
     w: usize,
     max_iter: u32,
 ) {
-    for chunk in glitch_idx.chunks(4) {
-        let mut dr = [0.0f64; 4];
-        let mut di = [0.0f64; 4];
-        let mut idx = [0usize; 4];
-        for (i, &g) in chunk.iter().enumerate() {
-            idx[i] = g;
-            dr[i] = dre[g % w];
-            di[i] = dim[g / w];
-        }
-        for i in chunk.len()..4 {
-            dr[i] = dr[0];
-            di[i] = di[0];
-        }
-        let dr_v = f64x4::from_array(dr);
-        let di_v = f64x4::from_array(di);
+    for &g in glitch_idx {
+        let dr = dre[g % w];
+        let di = dim[g / w];
         let (er, ei) = match series {
-            Some(s) if skip > 0 => s.evaluate_simd(dr_v, di_v),
-            _ => (f64x4::splat(0.0), f64x4::splat(0.0)),
+            Some(s) if skip > 0 => s.evaluate(dr, di),
+            _ => (0.0, 0.0),
         };
-        let (iters, mags) = perturb_iterate_simd(orbit, dr_v, di_v, max_iter, er, ei, skip);
-        for i in 0..chunk.len() {
-            if iters[i] != GLITCH_MARKER {
-                field.iters[idx[i]] = iters[i];
-                field.mag_sq[idx[i]] = mags[i];
-            }
+        // 标量版支持内联 Zhuoran rebase，能消化 SIMD 标记的"需 rebase"像素
+        let (iters, mags) = perturb_iterate(orbit, dr, di, max_iter, er, ei, skip);
+        if iters != GLITCH_MARKER {
+            field.iters[g] = iters;
+            field.mag_sq[g] = mags;
         }
     }
 }
@@ -481,5 +546,58 @@ mod tests {
             "1e18 图像细节不足：仅 {} 种迭代值（疑似退化成纯色）",
             distinct.len()
         );
+    }
+
+    /// cardioid/bulb 整帧跳过：深缩放的视野完全落在主心形内部时，
+    /// 应直接填 max_iter 返回（跳过扰动 pass），且结果与 MPFR 真值一致。
+    #[test]
+    fn deep_zoom_inside_cardioid_skips_pass() {
+        let json = r#"{
+            "width": 32, "height": 32, "max_iter": 800,
+            "output_filename": "test_inside.png",
+            "png_compression_level": 0, "png_filter_type": "none",
+            "center_re": "-0.1", "center_im": "0.0",
+            "zoom": "1e12",
+            "series_approx": false
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        let view = config.resolve_view().unwrap();
+        assert!(view.deep, "应走深缩放路径");
+
+        let field = render_deep(&config, &view);
+        // 整帧都应判为集合内部：全部像素迭代满 max_iter
+        assert!(field.iters.iter().all(|&i| i == config.max_iter), "cardioid 内部应全为 max_iter");
+        assert_eq!(field.glitch_count(), 0);
+
+        // 与逐像素 MPFR 真值对比（-0.1+0i 深在主心形内部，必不逃逸）
+        let prec = view.precision;
+        let half = Float::with_val(prec, 0.5);
+        let fw = Float::with_val(prec, 32.0);
+        let fh = Float::with_val(prec, 32.0);
+        let vw = Float::with_val(prec, view.width);
+        let vh = Float::with_val(prec, view.height);
+        let mut max_diff = 0i32;
+        for y in 0..32u32 {
+            for x in 0..32u32 {
+                // δ = (x/32 - 0.5)·view_w，全程 MPFR 避免 f64 下溢
+                let mut dx = Float::with_val(prec, x);
+                dx /= &fw;
+                dx -= &half;
+                dx *= &vw;
+                let mut dy = Float::with_val(prec, y);
+                dy /= &fh;
+                dy -= &half;
+                dy *= &vh;
+                let c_re = Float::with_val(prec, &view.center_re + &dx);
+                let c_im = Float::with_val(prec, &view.center_im + &dy);
+                let (gt, _) = naive_hp(&c_re, &c_im, config.max_iter);
+                let got = field.iters[(y * 32 + x) as usize];
+                let diff = (got as i32 - gt as i32).abs();
+                if diff > max_diff {
+                    max_diff = diff;
+                }
+            }
+        }
+        assert!(max_diff <= 2, "cardioid 内部与 MPFR 最大迭代差 {} 超容差", max_diff);
     }
 }
