@@ -329,17 +329,12 @@ pub fn perturb_iterate_simd(
             iter_count = newly_gl.select(u32x4::splat(GLITCH_MARKER), iter_count);
         }
 
-        // Zhuoran rebase 判据（SIMD 版）：|z_pixel| < |ε| 说明参考轨道不再是最优。
-        // SIMD lane 间迭代索引必须同步，无法内联 rebase，故标记 GLITCH_MARKER，
-        // 由 render.rs 的标量回填路径（perturb_iterate，支持真 rebase）重算。
-        let eps_mag_sq = eps_re * eps_re + eps_im * eps_im;
-        let need_rebase = mag_sq.simd_lt(eps_mag_sq);
-        let newly_rb = need_rebase & active;
-        if newly_rb.any() {
-            iter_count = newly_rb.select(u32x4::splat(GLITCH_MARKER), iter_count);
-        }
-
-        active = active & !escaped & !glitched & !need_rebase;
+        // 注意：不在这里检测 rebase 条件（|z_pixel|<|ε|）。深缩放+参考轨道
+        // 逃逸时 90%+ 像素会天然满足该条件（轨迹经过原点附近，ε≈-Z，是
+        // 需要 rebase 的正常状态而非错误）；若在 SIMD 里标 GLITCH_MARKER，
+        // 会引发海量像素走标量回填（2 亿像素 × 5000 迭代 → 卡死）。
+        // rebase 由标量路径（perturb_iterate / rerender_glitches）内联完成。
+        active = active & !escaped & !glitched;
         if !active.any() {
             break;
         }
